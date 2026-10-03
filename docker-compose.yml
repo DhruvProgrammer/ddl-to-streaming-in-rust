@@ -1,0 +1,49 @@
+# The website, plus the fixture origin used to demonstrate and test it.
+#
+#   docker compose up --build
+#   open http://localhost:8787
+
+services:
+  ddl-player:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: ddl-player:0.1.0
+    ports:
+      - "8787:8787"
+    environment:
+      # Limits are the whole safety story; they are per-process ceilings.
+      DDL_MAX_CONCURRENT_STREAMS: "256"
+      DDL_STREAM_BUFFER_BYTES: "524288"
+      DDL_PREFETCH_WINDOW_BYTES: "4194304"
+      DDL_CONNECT_TIMEOUT_MS: "5000"
+      DDL_RESPONSE_TIMEOUT_MS: "15000"
+      DDL_IDLE_TIMEOUT_MS: "20000"
+      DDL_MAX_REDIRECTS: "5"
+      DDL_MAX_RETRIES: "4"
+      DDL_LOG_JSON: "1"
+      RUST_LOG: "info"
+    restart: unless-stopped
+
+  # A local origin so you can try the player without hunting for a DDL.
+  # The private-address escape hatch is scoped to this one container.
+  fixture-origin:
+    image: node:22-alpine
+    working_dir: /srv
+    command: ["node", "fixture-origin.mjs", "--port", "9000", "--root", "/srv/media"]
+    volumes:
+      - ./tests/fixtures/media:/srv/media:ro
+      - ./tests/support:/srv/fixture-origin.mjs:ro
+    ports:
+      - "9000:9000"
+    profiles: ["demo"]
+
+  # Same origin, reachable *through* the player, for the demo only.
+  ddl-player-demo:
+    extends:
+      service: ddl-player
+    environment:
+      DDL_ALLOW_PRIVATE_HOSTS: "1"
+    depends_on:
+      - fixture-origin
+    profiles: ["demo"]

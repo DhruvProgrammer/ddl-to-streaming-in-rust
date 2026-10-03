@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#050505" />
+
+    <title>DDL Player — play a direct video link in your browser</title>
+    <meta
+      name="description"
+      content="Paste a direct download link and stream it instantly. Byte-range seeking, fast startup, nothing written to disk."
+    />
+    <link rel="canonical" href="https://example.com/" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="DDL Player" />
+    <meta property="og:title" content="DDL Player — play a direct video link" />
+    <meta
+      property="og:description"
+      content="Paste a direct download link and stream it instantly. Byte-range seeking, fast startup, nothing written to disk."
+    />
+    <meta property="og:url" content="https://example.com/" />
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="DDL Player — play a direct video link" />
+    <meta
+      name="twitter:description"
+      content="Paste a direct download link and stream it instantly."
+    />
+
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23050505'/%3E%3Cpath d='M13 10.5v11l9-5.5z' fill='%23E50914'/%3E%3C/svg%3E"
+    />
+  </head>
+  <body>
+    <main class="app" id="app" role="main">
+      <!-- Brand -->
+      <header class="brand">
+        <span class="brand-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="5 3 19 12 5 21 5 3" />
+          </svg>
+        </span>
+        <h1 class="brand-text">DDL<span>Player</span></h1>
+      </header>
+
+      <!-- Source -->
+      <form class="input-section" id="load" novalidate>
+        <div class="input-row">
+          <div class="field">
+            <label class="vh" for="urlInput">Direct video URL</label>
+            <input
+              class="url-input"
+              id="urlInput"
+              data-testid="url-input"
+              type="text"
+              name="url"
+              inputmode="url"
+              autocomplete="off"
+              spellcheck="false"
+              autocapitalize="off"
+              autocorrect="off"
+              enterkeyhint="go"
+              placeholder="Paste a direct video URL..."
+              aria-describedby="note"
+              required
+            />
+          </div>
+          <button class="play-btn" id="playBtn" data-testid="load-submit" type="submit">
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <polygon points="5 3 19 12 5 21 5 3" />
+            </svg>
+            <span>Play</span>
+          </button>
+        </div>
+        <p class="note" id="note" data-testid="status-note" role="status" aria-live="polite" hidden></p>
+      </form>
+
+      <!-- Indeterminate progress, while the source is being negotiated -->
+      <div class="status-bar" id="statusBar" aria-hidden="true">
+        <span class="status-bar-fill"></span>
+      </div>
+
+      <!-- Player -->
+      <section class="player-container" id="playerContainer" data-testid="stage" data-state="empty" data-empty>
+        <span class="ambient-glow" aria-hidden="true"></span>
+
+        <div class="player-wrapper" id="playerWrapper">
+          <video
+            class="video"
+            id="videoElement"
+            data-testid="video"
+            playsinline
+            preload="auto"
+            crossorigin="anonymous"
+            controlslist="nodownload noremoteplayback"
+          ></video>
+
+          <button class="center-play" id="centerPlay" data-testid="center-play" type="button" aria-label="Play">
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <polygon points="5 3 19 12 5 21 5 3" />
+            </svg>
+          </button>
+
+          <!-- Empty -->
+          <div class="player-state state-empty" id="stateEmpty" data-testid="veil-empty">
+            <span class="state-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <polygon points="5 3 19 12 5 21 5 3" />
+              </svg>
+            </span>
+            <p class="state-title">Ready to stream</p>
+            <p class="state-subtitle">Paste a direct video URL above</p>
+          </div>
+
+          <!-- Connecting / buffering -->
+          <div class="player-state state-loading" id="stateLoading" data-testid="veil-busy" hidden>
+            <span class="loading-indicator" aria-hidden="true"></span>
+            <p class="state-title" id="loadingText">Connecting to source...</p>
+          </div>
+
+          <!-- Error -->
+          <div class="player-state state-error" id="stateError" data-testid="veil-error" hidden>
+            <span class="error-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10" />
+                <line x1="15" y1="9" x2="9" y2="15" />
+                <line x1="9" y1="9" x2="15" y2="15" />
+              </svg>
+            </span>
+            <p class="state-title">Unable to play this source</p>
+            <p class="state-subtitle" id="errorSubtitle"></p>
+            <button class="retry-btn" id="retryBtn" data-testid="retry" type="button">Try Again</button>
+          </div>
+
+          <!-- Ended -->
+          <div class="player-state state-completed" id="stateCompleted" data-testid="veil-completed" hidden>
+            <span class="state-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="20 6 9 17 4 12" />
+              </svg>
+            </span>
+            <p class="state-title">Playback complete</p>
+          </div>
+
+          <!-- Controls -->
+          <div class="player-overlay" id="playerOverlay" data-testid="controls">
+            <div class="player-controls">
+              <div class="timeline-container" id="timeline">
+                <div class="timeline-track" aria-hidden="true">
+                  <span class="timeline-buffered" id="timelineBuffered"></span>
+                  <span class="timeline-progress" id="timelineProgress"></span>
+                  <span class="timeline-thumb" id="timelineThumb"></span>
+                </div>
+                <!-- The track above is the picture; this is the control. A native
+                     range input is what makes keyboard, touch and assistive
+                     technology work without reimplementing them. -->
+                <input
+                  class="scrub"
+                  id="seek"
+                  data-testid="seek"
+                  type="range"
+                  min="0"
+                  max="1000"
+                  step="1"
+                  value="0"
+                  aria-label="Seek"
+                />
+              </div>
+
+              <div class="controls-row">
+                <button class="ctrl-btn" id="ctrlPlayPause" data-testid="play-toggle" type="button" aria-label="Play">
+                  <svg class="icon-play" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                    <polygon points="5 3 19 12 5 21 5 3" />
+                  </svg>
+                  <svg class="icon-pause" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" hidden>
+                    <rect x="6" y="4" width="4" height="16" />
+                    <rect x="14" y="4" width="4" height="16" />
+                  </svg>
+                </button>
+
+                <span class="time-display">
+                  <span id="currentTime" data-testid="time-current">0:00</span>
+                  <span class="time-sep">/</span>
+                  <span id="duration" data-testid="time-total">0:00</span>
+                </span>
+
+                <span class="controls-spacer"></span>
+
+                <span class="volume-group">
+                  <button class="ctrl-btn" id="ctrlMute" data-testid="mute" type="button" aria-label="Mute">
+                    <svg class="icon-volume" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+                      <path class="wave" d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+                      <path class="wave" d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+                    </svg>
+                    <svg class="icon-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" hidden>
+                      <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+                      <line x1="23" y1="9" x2="17" y2="15" />
+                      <line x1="17" y1="9" x2="23" y2="15" />
+                    </svg>
+                  </button>
+                  <input
+                    class="volume-slider"
+                    id="volumeSlider"
+                    data-testid="volume"
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.05"
+                    value="1"
+                    aria-label="Volume"
+                  />
+                </span>
+
+                <select class="speed-select" id="speedSelect" data-testid="rate" aria-label="Playback speed">
+                  <option value="0.5">0.5×</option>
+                  <option value="0.75">0.75×</option>
+                  <option value="1" selected>1×</option>
+                  <option value="1.25">1.25×</option>
+                  <option value="1.5">1.5×</option>
+                  <option value="2">2×</option>
+                </select>
+
+                <button class="ctrl-btn" id="ctrlPip" data-testid="pip" type="button" aria-label="Picture in picture" title="Picture in picture" hidden>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <rect x="2" y="3" width="20" height="14" rx="2" />
+                    <rect x="11" y="9" width="9" height="7" rx="1" />
+                  </svg>
+                </button>
+
+                <button class="ctrl-btn" id="ctrlFullscreen" data-testid="fullscreen" type="button" aria-label="Fullscreen">
+                  <svg class="icon-expand" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <polyline points="15 3 21 3 21 9" />
+                    <polyline points="9 21 3 21 3 15" />
+                    <line x1="21" y1="3" x2="14" y2="10" />
+                    <line x1="3" y1="21" x2="10" y2="14" />
+                  </svg>
+                  <svg class="icon-compress" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" hidden>
+                    <polyline points="4 14 10 14 10 20" />
+                    <polyline points="20 10 14 10 14 4" />
+                    <line x1="14" y1="10" x2="21" y2="3" />
+                    <line x1="3" y1="21" x2="10" y2="14" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <div class="media-info" id="mediaInfo" data-testid="media-info" aria-label="Media information" hidden>
+        <span class="media-info-item" id="infoResolution">—</span>
+        <span class="media-info-sep" aria-hidden="true">•</span>
+        <span class="media-info-item" id="infoFormat">—</span>
+        <span class="media-info-sep" aria-hidden="true">•</span>
+        <span class="media-info-item" id="infoDuration">—</span>
+      </div>
+    </main>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

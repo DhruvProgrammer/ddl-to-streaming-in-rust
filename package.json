@@ -1,0 +1,29 @@
+{
+  "name": "ddl-player",
+  "private": true,
+  "version": "0.1.0",
+  "description": "A website that plays direct download links in the browser. Vite + TypeScript on the front, Rust on the back.",
+  "type": "module",
+  "scripts": {
+    "install:all": "npm --prefix frontend install",
+    "build:web": "npm --prefix frontend run build",
+    "build:server": "cargo build --release --manifest-path backend/Cargo.toml",
+    "build": "npm run build:web && npm run build:server",
+    "start": "node scripts/start.mjs",
+    "dev": "node scripts/dev.mjs",
+    "origin": "node tests/support/fixture-origin.mjs",
+    "hold": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/hold-stack.ps1",
+    "typecheck": "npm --prefix frontend run typecheck",
+    "test:rust": "cargo test --manifest-path backend/Cargo.toml",
+    "test:integration": "cargo test --manifest-path backend/Cargo.toml --test integration",
+    "test:chaos": "cargo test --manifest-path backend/Cargo.toml --test chaos -- --test-threads=1",
+    "test:leaks": "cargo test --manifest-path backend/Cargo.toml --test leaks -- --test-threads=1",
+    "test:browser": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/with-browser.ps1 -Project chromium",
+    "bench": "cargo bench --manifest-path backend/Cargo.toml",
+    "load": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/with-load.ps1",
+    "check": "npm run typecheck && cargo fmt --manifest-path backend/Cargo.toml -- --check && cargo clippy --manifest-path backend/Cargo.toml --all-targets -- -D warnings && npm run test:rust"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

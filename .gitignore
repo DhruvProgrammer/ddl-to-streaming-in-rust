@@ -1,0 +1,28 @@
+# Build output
+target/
+frontend/dist
+frontend/node_modules
+node_modules
+
+# Test output
+test-results
+playwright-report
+/blob-report
+
+# Measured artefacts: regenerate with scripts/with-load.ps1 and the screenshot spec
+/docs/load-results.json
+/docs/load-summary.json
+/docs/shot-*.png
+
+# Local agent and in-app verification tooling, not part of the product
+.reticle/
+.reticle.json
+reticle-dev.ts
+RETICLE.md
+.claude/
+AGENTS.md
+CLAUDE.md
+
+# Editors and OS
+.DS_Store
+*.swp

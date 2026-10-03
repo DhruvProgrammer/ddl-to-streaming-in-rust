@@ -1,0 +1,595 @@
+/* The player: the picture, the states it can be in, and the chrome over it. */
+
+.player-container {
+  position: relative;
+  inline-size: 100%;
+  max-inline-size: var(--player-max-width);
+}
+
+/* A red bloom behind the frame while there is something playing. Pure
+   decoration, so it never intercepts a tap. */
+.ambient-glow {
+  position: absolute;
+  inset-block-start: 50%;
+  inset-inline-start: 50%;
+  z-index: -1;
+  inline-size: 80%;
+  block-size: 80%;
+  filter: blur(60px);
+  background: radial-gradient(ellipse, var(--glow-accent) 0%, transparent 70%);
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+  transition: opacity 1s var(--ease);
+}
+
+.player-container[data-has-video] .ambient-glow {
+  opacity: 0.4;
+}
+
+.player-wrapper {
+  position: relative;
+  inline-size: 100%;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--player-radius);
+  background: var(--bg-surface);
+  box-shadow:
+    0 4px 24px rgb(0 0 0 / 40%),
+    0 1px 3px rgb(0 0 0 / 30%),
+    inset 0 1px 0 rgb(255 255 255 / 2%);
+}
+
+/* A tighter bloom on the frame itself. */
+.player-wrapper::before {
+  content: "";
+  position: absolute;
+  inset: -40%;
+  z-index: 0;
+  background: radial-gradient(ellipse at center, var(--glow-accent) 0%, transparent 60%);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--transition-slow);
+}
+
+.player-wrapper[data-has-video]::before {
+  opacity: 0.3;
+}
+
+.video {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  inline-size: 100%;
+  block-size: 100%;
+  background: #000;
+  object-fit: contain;
+}
+
+/* ------------------------------------------------------------ centre play */
+
+.center-play {
+  position: absolute;
+  inset-block-start: 50%;
+  inset-inline-start: 50%;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: clamp(56px, 10vw, 80px);
+  block-size: clamp(56px, 10vw, 80px);
+  border: 1px solid rgb(255 255 255 / 10%);
+  border-radius: 50%;
+  background: rgb(0 0 0 / 60%);
+  color: #fff;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, -50%) scale(0.9);
+  transition:
+    opacity var(--transition-base),
+    transform var(--transition-base),
+    background var(--transition-fast);
+}
+
+.center-play svg {
+  inline-size: clamp(24px, 4vw, 32px);
+  block-size: clamp(24px, 4vw, 32px);
+  margin-inline-start: 3px;
+}
+
+.player-wrapper[data-paused="true"] .center-play {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translate(-50%, -50%) scale(1);
+}
+
+.center-play:hover {
+  border-color: var(--accent);
+  background: rgb(229 9 20 / 70%);
+  transform: translate(-50%, -50%) scale(1.05);
+}
+
+/* ------------------------------------------------------------------ states */
+
+.player-state {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-sm);
+  padding: var(--space-lg);
+  text-align: center;
+}
+
+.state-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: clamp(48px, 8vw, 72px);
+  block-size: clamp(48px, 8vw, 72px);
+  margin-block-end: var(--space-sm);
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--bg-elevated);
+}
+
+.state-icon svg {
+  inline-size: clamp(22px, 4vw, 32px);
+  block-size: clamp(22px, 4vw, 32px);
+  color: var(--text-muted);
+}
+
+.state-title {
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+}
+
+.state-subtitle {
+  max-inline-size: 40ch;
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+}
+
+/* The connecting affordance is a red arc rather than a word, but the word is
+   there too — silence during a wait reads as a hang. */
+.loading-indicator {
+  inline-size: 32px;
+  block-size: 32px;
+  margin-block-end: var(--space-xs);
+  border: 3px solid rgb(255 255 255 / 10%);
+  border-block-start-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.state-loading .state-title {
+  font-size: var(--font-size-base);
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+
+.error-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 48px;
+  block-size: 48px;
+  margin-block-end: var(--space-xs);
+  border-radius: 50%;
+  background: rgb(239 68 68 / 10%);
+}
+
+.error-icon svg {
+  inline-size: 24px;
+  block-size: 24px;
+  color: var(--danger);
+}
+
+.retry-btn {
+  margin-block-start: var(--space-sm);
+  padding: 10px 24px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    background var(--transition-fast),
+    border-color var(--transition-fast);
+}
+
+.retry-btn:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-surface);
+}
+
+.state-completed .state-icon {
+  inline-size: 56px;
+  block-size: 56px;
+  border: 0;
+  background: rgb(34 197 94 / 10%);
+}
+
+.state-completed .state-icon svg {
+  color: var(--success);
+}
+
+/* ----------------------------------------------------------------- overlay */
+
+.player-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  background: linear-gradient(to top, rgb(0 0 0 / 70%) 0%, transparent 40%);
+  opacity: 1;
+  visibility: visible;
+  transition:
+    opacity var(--transition-base),
+    visibility 0s;
+}
+
+/* `data-idle` and `data-paused` are presence attributes, so they are matched by
+   presence. Selecting on `="true"` would never match, which leaves a faded bar
+   sitting over the veils swallowing their taps. `visibility` (deferred by the
+   transition) is what actually removes it from hit-testing and the tab order;
+   `opacity` alone does not. */
+.player-overlay[data-idle]:not([data-paused]) {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    opacity var(--transition-base),
+    visibility 0s var(--transition-base);
+}
+
+.player-overlay:not([data-idle]),
+.player-overlay:focus-within {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transition:
+    opacity var(--transition-base),
+    visibility 0s;
+}
+
+/* With no media there is nothing for the bar to do, and left in place it
+   overlays the veils — on a short viewport it covers the retry button, so
+   invisible chrome would swallow a visible, actionable control. */
+.player-container[data-empty] .player-overlay,
+.player-container[data-state="error"] .player-overlay,
+.player-container[data-state="completed"] .player-overlay {
+  display: none;
+}
+
+.player-controls {
+  display: flex;
+  flex-direction: column;
+  gap: clamp(6px, 1vw, 10px);
+  padding: clamp(10px, 2vw, 16px) clamp(12px, 2.5vw, 20px);
+}
+
+/* --------------------------------------------------------------- timeline */
+
+.timeline-container {
+  position: relative;
+  display: flex;
+  align-items: center;
+  inline-size: 100%;
+  block-size: 20px;
+  cursor: pointer;
+  touch-action: none;
+}
+
+.timeline-track {
+  position: relative;
+  inline-size: 100%;
+  block-size: 4px;
+  border-radius: 2px;
+  background: rgb(255 255 255 / 20%);
+  transition: block-size var(--transition-fast);
+}
+
+.timeline-container:hover .timeline-track,
+.timeline-container:active .timeline-track {
+  block-size: 6px;
+}
+
+.timeline-buffered,
+.timeline-progress {
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  border-radius: 2px;
+}
+
+.timeline-buffered {
+  inline-size: 0%;
+  background: rgb(255 255 255 / 30%);
+}
+
+.timeline-progress {
+  inline-size: 0%;
+  background: var(--accent);
+  transition: inline-size 50ms linear;
+}
+
+.timeline-thumb {
+  position: absolute;
+  inset-block-start: 50%;
+  inset-inline-start: 0%;
+  inline-size: 14px;
+  block-size: 14px;
+  border-radius: 50%;
+  background: var(--accent-bright);
+  box-shadow: 0 0 6px var(--glow-accent-strong);
+  opacity: 0;
+  transform: translate(-50%, -50%) scale(0);
+  transition:
+    transform var(--transition-fast),
+    opacity var(--transition-fast);
+}
+
+.timeline-container:hover .timeline-thumb,
+.timeline-container:active .timeline-thumb,
+.timeline-container:focus-within .timeline-thumb {
+  opacity: 1;
+  transform: translate(-50%, -50%) scale(1);
+}
+
+/* The track above is the picture. This is the control: a native range input
+   carries pointer, touch, keyboard and assistive technology for free, so it is
+   laid over the track and made invisible rather than reimplemented. */
+.scrub {
+  position: absolute;
+  inset: 0;
+  inline-size: 100%;
+  block-size: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+}
+
+.timeline-container:focus-within .timeline-track {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+/* ------------------------------------------------------------ control row */
+
+.controls-row {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: clamp(8px, 2vw, 14px);
+}
+
+.ctrl-btn {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  inline-size: clamp(36px, 5vw, 42px);
+  block-size: clamp(36px, 5vw, 42px);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition:
+    background var(--transition-fast),
+    color var(--transition-fast);
+}
+
+.ctrl-btn svg {
+  inline-size: clamp(18px, 2.5vw, 22px);
+  block-size: clamp(18px, 2.5vw, 22px);
+}
+
+.ctrl-btn:hover:not(:disabled) {
+  background: rgb(255 255 255 / 10%);
+  color: #fff;
+}
+
+.ctrl-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.time-display {
+  flex-shrink: 0;
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.time-sep {
+  margin-inline: 2px;
+  opacity: 0.5;
+}
+
+.controls-spacer {
+  flex: 1;
+}
+
+.volume-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.volume-slider {
+  inline-size: clamp(50px, 8vw, 80px);
+  block-size: 4px;
+  border-radius: 2px;
+  background: rgb(255 255 255 / 20%);
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.volume-slider::-webkit-slider-thumb {
+  inline-size: 12px;
+  block-size: 12px;
+  border: 0;
+  border-radius: 50%;
+  background: #fff;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.volume-slider::-moz-range-thumb {
+  inline-size: 12px;
+  block-size: 12px;
+  border: 0;
+  border-radius: 50%;
+  background: #fff;
+  cursor: pointer;
+}
+
+.speed-select {
+  padding: 4px 8px;
+  border: 1px solid rgb(255 255 255 / 15%);
+  border-radius: 6px;
+  background: rgb(255 255 255 / 10%);
+  color: var(--text-primary);
+  font-family: var(--font-family);
+  font-size: var(--font-size-xs);
+  cursor: pointer;
+}
+
+/* --------------------------------------------------------------- fullscreen */
+
+/* Confirmation for the double-tap gesture: the seek happened, by this much. */
+.seek-flash {
+  position: absolute;
+  inset-block-start: 50%;
+  inset-inline-start: 50%;
+  z-index: 5;
+  padding: 8px 16px;
+  border-radius: 8px;
+  background: rgb(0 0 0 / 70%);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+  animation: seek-flash 800ms var(--ease) forwards;
+}
+
+@keyframes seek-flash {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.8);
+  }
+  20% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+  80% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.9);
+  }
+}
+
+.player-container:fullscreen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+}
+
+.player-container:fullscreen .player-wrapper {
+  max-inline-size: 100%;
+  max-block-size: 100dvh;
+  border: 0;
+  border-radius: 0;
+}
+
+/* ------------------------------------------------------------- responsive */
+
+@media (max-width: 480px) {
+  .volume-slider {
+    display: none;
+  }
+}
+
+@media (max-width: 400px) {
+  .speed-select {
+    display: none;
+  }
+}
+
+/* Touch has no hover, so the thumb must always be reachable. */
+@media (hover: none) and (pointer: coarse) {
+  .player-overlay[data-idle]:not([data-paused]) {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+  }
+
+  .timeline-track {
+    block-size: 5px;
+  }
+
+  .timeline-thumb {
+    inline-size: 16px;
+    block-size: 16px;
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+
+  .ctrl-btn {
+    min-inline-size: 44px;
+    min-block-size: 44px;
+  }
+}
+
+@media (max-height: 500px) and (orientation: landscape) {
+  .app {
+    gap: var(--space-sm);
+    padding: var(--space-sm);
+  }
+
+  .brand {
+    display: none;
+  }
+
+  .player-wrapper {
+    border-radius: var(--radius-sm);
+  }
+}
+
+@media (forced-colors: active) {
+  .timeline-progress,
+  .status-bar-fill {
+    background: Highlight;
+  }
+
+  .player-overlay {
+    background: Canvas;
+  }
+}
