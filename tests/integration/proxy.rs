@@ -43,7 +43,11 @@ async fn probe_reports_length_type_and_range_support_in_one_round_trip() {
     assert_eq!(body["content_length"], SIZE as u64);
     assert_eq!(body["range_supported"], true);
     assert_eq!(body["container"], "mp4");
-    assert_eq!(body["evidence"], "content-type");
+    // The evidence is the body, not the header. The probe already requests a
+    // 1 KiB prefix in this one round trip, so the container is identified from
+    // the bytes it read — which is also what lets the verdict survive an origin
+    // that sends no Content-Type, a generic one, or a lying one.
+    assert_eq!(body["evidence"], "magic-bytes");
     assert_eq!(body["redirects"], 0);
     assert_eq!(body["cached"], false);
     // Exactly one origin request: no HEAD-then-GET waterfall.

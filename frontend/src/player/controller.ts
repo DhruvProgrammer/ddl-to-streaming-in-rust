@@ -301,18 +301,27 @@ export class DdlPlayer {
 
       if (!view.streamable) {
         const message = view.reason ?? view.warning ?? "This media cannot be played here.";
-        this.#status.error(message, view.warning ?? undefined);
         // Remember the server's own reason. It knows why; the browser will only
         // report a generic media code, and the error veil should show the truth.
         this.#lastError = {
           message,
-          detail: view.contentType ?? "",
+          detail: view.originContentType ?? "",
           action: "Check the link points at a playable video file.",
           // The server reached the source and judged the media itself. Asking
           // again would fetch the same bytes and reach the same verdict.
           retryable: false,
         };
         this.#format = container(view.container);
+        // A probe that says "not playable" while the element is happily
+        // rendering frames is a false negative, not an error the viewer caused.
+        // Shouting about it over a working video is how you teach people to
+        // ignore the one line that matters.
+        const playing = this.#state === "playing" || this.#state === "buffering";
+        if (playing) {
+          this.#status.info(`Playing, but the server could not identify this as a standard format. ${message}`);
+        } else {
+          this.#status.error(message, view.warning ?? undefined);
+        }
         // The media element may already have failed with a bare media code that
         // carries no reason and offers no retry. The server knows better, and
         // it just answered, so let its reason replace the browser's shrug.

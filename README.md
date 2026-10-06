@@ -256,14 +256,37 @@ MEASURED or EXPECTED, and nothing is extrapolated past what was run.
 - **The probe is 1 KiB, not 1 byte.** `bytes=0-0` is cheaper but gives no
   container signature, so "is this actually MP4?" would be a guess. 1 KiB is
   the smallest request that lets us sniff the container.
-- **The streaming path trusts `Content-Type`, the probe does not.** Reading
-  magic bytes before the first byte would add latency to playback for
-  information the player usually does not need; the probe, which is not in the
-  critical path, does verify it.
-- **MPEG-TS, FLV and AVI are refused with a reason.** They are valid video and
-  no browser will play them from a bare `<video src>`. Remuxing would mean
-  FFmpeg in the request path. The seam for it is one function in the engine;
-  today it reports why it will not, instead of half-playing the file.
+- **The URL extension is the weakest evidence there is, and the last used.** A
+  real direct-download link is routinely `/download/37334`, `/get?id=12345` or
+  `/file?token=…` — no extension, an opaque id, a signature in the query. So
+  container identification is ranked: response bytes, then `Content-Type`, then
+  a `Content-Disposition` filename (the origin describing its own file), and
+  only then the URL. Critically, once a body has been read, the extension can
+  no longer rescue it: an HTML error page behind a `.mp4` path is an error page,
+  and believing the URL is how an expired link gets reported as "convert your
+  file to MP4".
+- **The streaming path reads the body too, when it has to.** The probe is not in
+  the critical path, so it was once allowed to trust `Content-Type` while the
+  stream endpoint did not. That made the two disagree: the probe would say
+  playable and the stream endpoint would answer 415 for the same URL, so nothing
+  ever played. When the headers and the extension are both inconclusive, the
+  stream path now fetches a 1 KiB prefix and identifies from the bytes — one
+  small request on the cold-cache path only.
+- **A refused source says what actually came back.** `text/html`, an empty body,
+  a JSON error envelope and a content-encoded body are four different problems
+  with four different fixes, and all four used to be reported as "unsupported
+  container". Now they are named, because the viewer's file is usually fine and
+  their link is what expired.
+- **MPEG-TS, FLV, AVI and Matroska are refused with a reason.** They are valid
+  video and no browser will play them from a bare `<video src>`; WebM is a
+  constrained subset of Matroska, not the same thing, and reporting a `.mkv` as
+  `video/webm` just moves the failure to the browser. Remuxing would mean FFmpeg
+  in the request path. The seam for it is one function in the engine; today it
+  reports why it will not, instead of half-playing the file.
+- **HLS manifests are refused, deliberately.** Serving the manifest is easy,
+  but the segment requests that follow would go straight to the origin, outside
+  the proxy — which breaks signed and temporary links outright. Reporting it as
+  playable and then failing is worse than saying so up front.
 - **The metadata cache is not used to decide lengths.** Caching a length and
   trusting it later is how a proxy serves a corrupt seek. The cache makes
   probes fast; it never makes a byte range.

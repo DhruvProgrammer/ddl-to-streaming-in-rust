@@ -51,6 +51,8 @@ export interface MediaView {
 export interface ProbeView {
   streamable: boolean;
   contentType: string | null;
+  /** What the origin actually declared, before we concluded anything. */
+  originContentType: string | null;
   contentLength: number | null;
   rangeSupported: boolean;
   container: string;

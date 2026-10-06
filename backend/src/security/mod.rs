@@ -189,7 +189,7 @@ pub fn validate_with(raw: &str, policy: Policy) -> Result<SafeUrl, PlayerError> 
         .ok_or_else(|| PlayerError::new(ErrorCode::InvalidUrl).with_reason("url has no host"))?;
 
     let hostname = match host {
-        Host::Domain(d) => d.to_ascii_lowercase(),
+        Host::Domain(d) => normalise_host(d),
         Host::Ipv4(ip) => {
             check_ip_with(IpAddr::V4(ip), policy)?;
             ip.to_string()
@@ -216,6 +216,19 @@ pub fn validate_with(raw: &str, policy: Policy) -> Result<SafeUrl, PlayerError> 
     };
 
     Ok(SafeUrl { url, authority })
+}
+
+/// Lowercase a domain and strip its trailing dot.
+///
+/// `db.local.` and `db.local` name the same host, and every resolver accepts
+/// both — but a suffix denylist tested with `ends_with(".local")` does not match
+/// the first. Normalising once, here, means every later check and the DNS
+/// lookup itself see the same name the policy was written about.
+fn normalise_host(domain: &str) -> String {
+    domain
+        .to_ascii_lowercase()
+        .trim_end_matches('.')
+        .to_owned()
 }
 
 fn check_host_name(name: &str) -> Result<(), PlayerError> {
@@ -799,6 +812,36 @@ mod tests {
         }
         // And the strict policy still refuses the addresses.
         assert!(validate_with("http://127.0.0.1:9000/video.mp4", Policy::STRICT).is_err());
+    }
+
+    /// A trailing dot names the same host and every resolver accepts it, so a
+    /// suffix denylist tested with a bare `ends_with` misses it. Under
+    /// `DDL_ALLOW_PRIVATE_HOSTS` the address check is relaxed, which makes this
+    /// the only thing standing between a request and an internal name.
+    #[test]
+    fn a_trailing_dot_does_not_evade_the_internal_name_denylist() {
+        for bad in [
+            "http://db.internal./video.mp4",
+            "http://printer.local./video.mp4",
+            "http://metadata.google.internal./x",
+            "http://localhost./video.mp4",
+            "http://nas.lan./video.mp4",
+            // Repeated dots are the same trick with extra steps.
+            "http://db.internal../video.mp4",
+        ] {
+            assert!(
+                validate_with(bad, Policy::TRUSTED).is_err(),
+                "{bad} must stay refused: a trailing dot does not make an \
+                 internal name external"
+            );
+        }
+    }
+
+    /// Normalisation must not break an ordinary public name.
+    #[test]
+    fn a_trailing_dot_on_a_public_name_is_accepted() {
+        assert!(validate_syntax("https://example.com./video.mp4").is_ok());
+        assert_eq!(normalise_host("Example.COM."), "example.com");
     }
 
     #[tokio::test]

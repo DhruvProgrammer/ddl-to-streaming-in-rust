@@ -45,6 +45,16 @@ path = "../tests/integration/proxy.rs"
 harness = true
 
 [[test]]
+name = "extensionless"
+path = "../tests/integration/extensionless.rs"
+harness = true
+
+[[test]]
+name = "ddl_live"
+path = "../tests/integration/ddl_live.rs"
+harness = true
+
+[[test]]
 name = "chaos"
 path = "../tests/chaos/network.rs"
 harness = true

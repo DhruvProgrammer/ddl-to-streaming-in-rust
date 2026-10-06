@@ -69,10 +69,12 @@ export function fromApi(e: ApiError): PlayerErrorView {
   if (e.code && !known) detailBits.push(e.code);
   return {
     message: known?.message ?? e.message,
-    // Where we have our own wording it wins; otherwise the server already wrote
-    // a user-facing action for this exact failure and there is no reason to
-    // replace it with a generic one.
-    action: known?.action ?? e.user_action ?? "Check the source, then try again.",
+    // The server wrote this action for *this* failure — it knows whether the
+    // link expired, whether the origin compresses its downloads, whether it
+    // refused a range. Our table has generic wording for the same code, and
+    // substituting it is how a viewer is told to convert a file that was never
+    // the problem. Ours is only the fallback.
+    action: e.user_action || known?.action || "Check the source, then try again.",
     detail: detailBits.join(" · "),
     retryable: e.retryable || known === undefined,
   };

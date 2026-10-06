@@ -91,19 +91,16 @@ impl Default for Config {
 
 /// Media types every mainstream browser can play via a bare `<video src>`.
 fn default_media_types() -> Vec<String> {
+    // Exactly the types a browser-playable container reports. An entry that no
+    // container can produce can never match, so it reads as a containment
+    // boundary while silently not being one.
     [
         "video/mp4",
         "video/webm",
         "video/ogg",
         "video/quicktime",
-        "video/x-matroska",
-        "audio/mp4",
         "audio/mpeg",
-        "audio/webm",
-        "audio/ogg",
-        "application/vnd.apple.mpegurl",
-        "application/x-mpegurl",
-        "application/mp4",
+        "audio/wav",
     ]
     .iter()
     .map(|s| (*s).to_owned())
@@ -245,13 +242,69 @@ mod tests {
     #[test]
     fn media_types_include_browser_playable_containers() {
         let t = Config::default().allowed_media_types;
-        for want in [
-            "video/mp4",
-            "video/webm",
-            "application/vnd.apple.mpegurl",
-            "audio/mp4",
-        ] {
+        for want in ["video/mp4", "video/webm", "audio/mpeg"] {
             assert!(t.iter().any(|x| x == want), "missing {want}");
+        }
+    }
+
+    /// Every allow-list entry must be one the identifier can actually produce.
+    ///
+    /// An unreachable entry is worse than a missing one: it reads as a
+    /// containment boundary and silently is not one. `DDL_ALLOWED_MEDIA_TYPES`
+    /// is advertised in the README, so it has to mean something.
+    #[test]
+    fn every_allowed_media_type_is_reachable_from_an_identifiable_container() {
+        use crate::media::Container;
+        let producible: Vec<&str> = [
+            Container::Mp4,
+            Container::Mov,
+            Container::WebM,
+            Container::Matroska,
+            Container::Ogg,
+            Container::Mp3,
+            Container::Wav,
+            Container::MpegTs,
+            Container::Hls,
+            Container::Flv,
+            Container::Avi,
+            Container::Html,
+            Container::Json,
+            Container::Compressed,
+            Container::Empty,
+            Container::Unknown,
+        ]
+        .iter()
+        .map(|c| c.media_type())
+        .collect();
+        for entry in Config::default().allowed_media_types {
+            assert!(
+                producible.contains(&entry.as_str()),
+                "allowed_media_types contains {entry:?}, which no container can \
+                 report — it can never match and so is not a real boundary"
+            );
+        }
+    }
+
+    /// A type on the allow-list must also be one a browser can decode, or the
+    /// list promises more than the product can keep.
+    #[test]
+    fn every_allowed_media_type_is_browser_playable() {
+        use crate::media::Container;
+        for entry in Config::default().allowed_media_types {
+            let playable = [
+                Container::Mp4,
+                Container::Mov,
+                Container::WebM,
+                Container::Ogg,
+                Container::Mp3,
+                Container::Wav,
+            ]
+            .iter()
+            .any(|c| c.media_type() == entry);
+            assert!(
+                playable,
+                "{entry:?} is allowed but no browser-playable container reports it"
+            );
         }
     }
 }

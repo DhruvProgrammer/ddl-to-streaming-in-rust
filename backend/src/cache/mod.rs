@@ -26,13 +26,22 @@ pub struct ResourceMeta {
     pub final_url: String,
     /// `host:port` of the origin actually serving bytes.
     pub origin: String,
+    /// What we will send downstream: the identified type, or the origin's.
     pub content_type: Option<String>,
+    /// What the origin actually declared, kept so the interface can say "the
+    /// origin returned text/html" rather than only what we concluded from it.
+    pub origin_content_type: Option<String>,
     pub content_length: Option<u64>,
     pub accept_ranges: Option<String>,
     pub range_supported: bool,
     pub etag: Option<String>,
     pub last_modified: Option<String>,
     pub media: MediaInfo,
+    /// Decided once, when the resource was identified. Everything that reports
+    /// on playability reads this rather than recomputing it, because two
+    /// recomputations is how the probe and the stream endpoint start
+    /// disagreeing about the same URL.
+    pub streamable: bool,
     pub probed_at: Instant,
 }
 
@@ -47,6 +56,10 @@ impl ResourceMeta {
         self.final_url.len()
             + self.origin.len()
             + self.content_type.as_ref().map_or(0, String::len)
+            + self
+                .origin_content_type
+                .as_ref()
+                .map_or(0, String::len)
             + self.accept_ranges.as_ref().map_or(0, String::len)
             + self.etag.as_ref().map_or(0, String::len)
             + self.last_modified.as_ref().map_or(0, String::len)
@@ -321,16 +334,19 @@ mod tests {
     use std::thread;
 
     fn meta(url: &str) -> ResourceMeta {
+        let media = identify(Some("video/mp4"), "/a.mp4", None, None);
         ResourceMeta {
             final_url: url.to_owned(),
             origin: "example.com:443".to_owned(),
             content_type: Some("video/mp4".to_owned()),
+            origin_content_type: Some("video/mp4".to_owned()),
             content_length: Some(1_000_000),
             accept_ranges: Some("bytes".to_owned()),
             range_supported: true,
             etag: Some("\"v1\"".to_owned()),
             last_modified: None,
-            media: identify(Some("video/mp4"), "/a.mp4", None),
+            streamable: media.container.browser_native(),
+            media,
             probed_at: Instant::now(),
         }
     }

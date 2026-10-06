@@ -19,7 +19,8 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use futures_util::StreamExt;
 use http::header::{
-    HeaderMap, HeaderValue, ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG,
+    HeaderMap, HeaderValue, ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_ENCODING, CONTENT_LENGTH,
+    CONTENT_RANGE, CONTENT_TYPE, ETAG,
     LAST_MODIFIED, LOCATION, RANGE,
 };
 use http::{HeaderName, StatusCode};
@@ -115,6 +116,52 @@ impl OriginResponse {
             .map(|s| s.trim().to_ascii_lowercase())
     }
 
+    /// Filename from `Content-Disposition`, if the origin offered one.
+    ///
+    /// This is evidence, not a claim: the origin is describing the bytes it is
+    /// sending. It is how a great many extensionless DDL endpoints label
+    /// themselves, so it outranks the URL and never outranks the body.
+    pub fn disposition_filename(&self) -> Option<&str> {
+        let raw = self.headers.get(CONTENT_DISPOSITION)?.to_str().ok()?;
+        for part in raw.split(';').skip(1) {
+            let part = part.trim();
+            let lower = part.to_ascii_lowercase();
+            let Some(rest) = lower.strip_prefix("filename") else {
+                continue;
+            };
+            if !rest.is_empty() && !rest.starts_with('=') && !rest.starts_with("*=") {
+                continue;
+            }
+            let value = part
+                .split_once('=')
+                .map(|(_, v)| v.trim().trim_matches('"'))
+                .unwrap_or_default();
+            if value.is_empty() {
+                continue;
+            }
+            // `filename*=UTF-8''name.ext` carries the useful extension after the
+            // last apostrophe-separated field.
+            let decoded = value.rsplit('\'').next().unwrap_or(value);
+            if !decoded.is_empty() {
+                return Some(decoded);
+            }
+        }
+        None
+    }
+
+    /// A content coding we did not ask for and cannot undo.
+    ///
+    /// We request `identity` because a coded body makes every byte offset and
+    /// `Content-Range` a lie, which silently breaks seeking. If the origin
+    /// codes anyway we must say so rather than sniff gzip and call it media.
+    pub fn content_encoding(&self) -> Option<&str> {
+        let raw = self.headers.get(CONTENT_ENCODING)?.to_str().ok()?.trim();
+        if raw.is_empty() || raw.eq_ignore_ascii_case("identity") {
+            return None;
+        }
+        Some(raw)
+    }
+
     pub fn content_range(&self) -> Option<(u64, u64, Option<u64>)> {
         self.headers
             .get(CONTENT_RANGE)
@@ -136,7 +183,12 @@ impl OriginResponse {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ProbeResult {
     pub streamable: bool,
+    /// What we will hand the browser.
     pub content_type: Option<String>,
+    /// What the origin actually declared, kept so a mismatch is reportable
+    /// rather than hidden: an HTML error page behind `video/mp4` is exactly
+    /// the case a viewer needs named.
+    pub origin_content_type: Option<String>,
     pub content_length: Option<u64>,
     pub range_supported: bool,
     pub accept_ranges: Option<String>,
@@ -249,15 +301,38 @@ impl Engine {
 
         let token = CancellationToken::new();
         let probe_range = format!("bytes=0-{}", PROBE_HEAD_BYTES - 1);
-        let mut resp = match self.fetch(url, Some(&probe_range), &token).await {
-            Ok(r) => r,
-            Err(e) if e.code == ErrorCode::Http416 => {
-                // Some origins reject a narrow range on an empty resource.
+        // A 416 comes back as a response, not an error, so this has to be
+        // checked before the generic `status >= 400` below.
+        let mut resp = self.fetch(url, Some(&probe_range), &token).await?;
+        if resp.status == 416 {
+            let zero_length = resp
+                .headers()
+                .get(CONTENT_RANGE)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(is_zero_length);
+            if zero_length {
+                // `bytes */0` is a conforming way to say "there is nothing
+                // here", and asking for `bytes=0-` is the only way to get past
+                // an origin that rejects any bounded range on an empty
+                // resource. One extra request, only for that case: a 416 from a
+                // seek past the end is passed straight through.
                 let token2 = CancellationToken::new();
-                self.fetch(url, Some("bytes=0-"), &token2).await?
+                resp = self.fetch(url, Some("bytes=0-"), &token2).await?;
+                if resp.status == 416
+                    && resp
+                        .headers()
+                        .get(CONTENT_RANGE)
+                        .and_then(|v| v.to_str().ok())
+                        .is_some_and(is_zero_length)
+                {
+                    return Err(PlayerError::new(ErrorCode::InvalidContentType)
+                        .with_reason("the origin reports the resource is zero bytes long".to_owned())
+                        .with_user_action(
+                            "There is no video at this link. It may have been removed.",
+                        ));
+                }
             }
-            Err(e) => return Err(e),
-        };
+        }
 
         if resp.status >= 400 {
             return Err(Self::status_error(resp.status, resp.headers()));
@@ -265,13 +340,12 @@ impl Engine {
 
         // Sniff the container signature from the first chunk, then abandon the
         // body: a probe must never transfer more than one buffer.
-        let head = read_head(resp.take_body(), self.0.cfg.read_chunk_bytes).await;
-        self.finish_probe(url, key, started, resp, head)
+        let head = read_head(resp.take_body(), self.0.cfg.read_chunk_bytes, self.0.cfg.response_timeout).await;
+        self.finish_probe(key, started, resp, head)
     }
 
     fn finish_probe(
         &self,
-        url: &SafeUrl,
         key: String,
         started: Instant,
         resp: OriginResponse,
@@ -284,6 +358,23 @@ impl Engine {
         let hops = resp.hops;
         let origin = resp.final_authority.clone();
         let final_url = crate::security::redact_url(&resp.final_url);
+        // Extension evidence must come from the URL that actually served the
+        // bytes. After a redirect that is the last hop, not the one the viewer
+        // pasted — and `origin`'s headers are the last hop's headers.
+        let served_path = resp.final_url.path().to_owned();
+        let filename = resp.disposition_filename().map(|s| s.to_owned());
+
+        // A coded body cannot be inspected or seeked, and we will not forward
+        // it claiming it is media. Say exactly what the origin did.
+        if let Some(encoding) = resp.content_encoding() {
+            return Err(PlayerError::new(ErrorCode::InvalidContentType)
+                .with_reason(format!(
+                    "the origin returned a content-encoded body ({encoding}); it cannot be \
+                     inspected or seeked without decoding it first"
+                ))
+                .with_user_action("The source host compresses its downloads; it cannot be \
+                                  streamed as-is."));
+        }
 
         let (range_supported, content_length) = match resp.content_range() {
             // `bytes 0-0/TOTAL` is the authoritative length.
@@ -291,34 +382,30 @@ impl Engine {
             _ => (resp.range_supported(), resp.length()),
         };
 
-        let info = media::identify(content_type.as_deref(), url.url().path(), Some(&head));
+        let origin_content_type = content_type.clone();
+        let info = media::identify(
+            content_type.as_deref(),
+            &served_path,
+            Some(&head),
+            filename.as_deref(),
+        );
         // Report the type we will actually hand the browser, which is the
         // origin's when it told us and the identified one when it did not.
         let content_type = Some(info.media_type.clone());
-        let streamable = info.container.browser_native()
-            && self.0.cfg.allowed_media_types.contains(&info.media_type);
+        let streamable = self.is_streamable(&info);
 
-        let warning = if !info.container.browser_native() {
-            info.remux_reason.clone()
-        } else if !range_supported {
-            Some(
-                "The source does not support byte ranges; seeking will restart the download."
-                    .to_owned(),
-            )
-        } else {
-            None
-        };
-
-        let meta = ResourceMeta {
+let meta = ResourceMeta {
             final_url: final_url.clone(),
             origin: origin.clone(),
             content_type,
+            origin_content_type,
             content_length,
             accept_ranges,
             range_supported,
             etag,
             last_modified,
             media: info,
+            streamable,
             probed_at: Instant::now(),
         };
 
@@ -326,9 +413,6 @@ impl Engine {
         result.redirects = hops;
         result.ttfb_ms = resp.ttfb.as_secs_f64() * 1000.0;
         result.probe_ms = started.elapsed().as_secs_f64() * 1000.0;
-        if result.reason.is_none() && !range_supported && streamable {
-            result.warning = warning.clone();
-        }
         self.0.cache.put(key, meta);
         self.0.metrics.ttfb_us.record_duration(resp.ttfb);
         self.0.metrics.startup_us.record_duration(started.elapsed());
@@ -336,10 +420,14 @@ impl Engine {
     }
 
     fn from_meta(meta: &ResourceMeta, cached: bool) -> ProbeResult {
-        let streamable = meta.media.container.browser_native();
+        // Read the one verdict that was decided when the resource was probed,
+        // rather than recomputing it here. Recomputing is how the probe and the
+        // stream endpoint came to disagree about the same URL.
+        let streamable = meta.streamable;
         ProbeResult {
             streamable,
             content_type: meta.content_type.clone(),
+            origin_content_type: meta.origin_content_type.clone(),
             content_length: meta.content_length,
             range_supported: meta.range_supported,
             accept_ranges: meta.accept_ranges.clone(),
@@ -366,6 +454,13 @@ impl Engine {
                     .to_owned()
             }),
         }
+    }
+
+    /// The one definition of "a browser can play this", used by the probe, the
+    /// stream path and the cache alike.
+    fn is_streamable(&self, info: &MediaInfo) -> bool {
+        info.container.browser_native()
+            && self.0.cfg.allowed_media_types.contains(&info.media_type)
     }
 
     // --------------------------------------------------------------- stream
@@ -454,8 +549,8 @@ impl Engine {
             return Err(Self::status_error(resp.status, resp.headers()));
         }
 
-        let info = self.media_for(&req.url, &resp)?;
-        if !info.container.browser_native() {
+        let info = self.media_for(&req.url, &resp, None).await?;
+        if !info.container.browser_native() || !self.is_streamable(&info) {
             self.0
                 .metrics
                 .media_rejected
@@ -557,31 +652,103 @@ impl Engine {
 
     /// Content-type decision for the streaming path.
     ///
-    /// Unlike probe we do not wait for magic bytes: doing so would add a read
-    /// before the first byte reaches the player. We trust the origin's type,
-    /// then the file extension, then the last probe result as a hint.
-    fn media_for(&self, url: &SafeUrl, resp: &OriginResponse) -> Result<MediaInfo, PlayerError> {
-        let ct = resp.content_type();
-        if let Some(raw) = ct {
-            if !media::is_generic_content_type(raw) && media::from_content_type(raw).is_some() {
-                return Ok(media::identify(Some(raw), url.url().path(), None));
+    /// `head` is the body prefix when the caller already read one. When we have
+    /// it, the body decides — because an extensionless DDL has nothing else to
+    /// decide with, and consulting a cache entry that may have expired, been
+    /// evicted, or never existed is how a valid link got refused mid-playback.
+    async fn media_for(
+        &self,
+        url: &SafeUrl,
+        resp: &OriginResponse,
+        head: Option<&[u8]>,
+    ) -> Result<MediaInfo, PlayerError> {
+        // Extension evidence, like header evidence, must come from the hop that
+        // served the bytes.
+        let served_path = resp.final_url.path();
+        let filename = resp.disposition_filename();
+
+        if let Some(head) = head {
+            // A decisive body settles it, whatever the headers or the URL claim.
+            let info =
+                media::identify(resp.content_type(), served_path, Some(head), filename);
+            if info.container.is_definitive() {
+                return Ok(info);
+            }
+            // Body present but unidentifiable: fall through so a recognised
+            // Content-Type can still carry it, but never the extension.
+            return Ok(media::identify(
+                resp.content_type(),
+                served_path,
+                Some(head),
+                filename,
+            ));
+        }
+
+        if let Some(raw) = resp.content_type() {
+            if let Some(c) = media::from_content_type(raw) {
+                if !media::is_generic_content_type(raw) || c.is_definitive() {
+                    return Ok(media::identify(Some(raw), served_path, None, filename));
+                }
             }
         }
-        let from_path = media::identify(None, url.url().path(), None);
-        if from_path.container != Container::Unknown {
-            return Ok(from_path);
-        }
-        if let Some(raw) = ct {
-            return Ok(media::identify(Some(raw), url.url().path(), None));
-        }
-        let key = url.url().as_str().to_owned();
-        if let Some(meta) = self.0.cache.get(&key) {
-            if meta.media.container != Container::Unknown {
+
+        // A cached verdict is a hint, never the last line: a container is a
+        // property of the bytes and outlives the volatile metadata, but an
+        // entry that says "unknown" must send us back to the bytes rather than
+        // be treated as a refusal.
+        if let Some(meta) = self.0.cache.get(&url.url().as_str().to_owned()) {
+            if meta.media.container.is_definitive() {
                 return Ok(meta.media);
             }
         }
+
+        // Nothing cached and no body to read: fetch a short prefix purely to
+        // identify it. One small request on the cold path only, and it is the
+        // difference between an extensionless DDL playing and being refused —
+        // the URL cannot help here, so the bytes have to be asked.
+        let token = CancellationToken::new();
+        let peek_range = format!("bytes=0-{}", PROBE_HEAD_BYTES - 1);
+        if let Ok(mut peek) = self.fetch(url, Some(&peek_range), &token).await {
+            if peek.status < 400 {
+                let head = read_head(peek.take_body(), self.0.cfg.read_chunk_bytes, self.0.cfg.response_timeout).await;
+                if !head.is_empty() {
+                    let info = media::identify(
+                        peek.content_type(),
+                        peek.final_url.path(),
+                        Some(&head),
+                        peek.disposition_filename(),
+                    );
+                    // Only a decisive read is worth trusting: caching a timeout
+                    // or an empty prefix would turn a transient failure into a
+                    // verdict that outlives it.
+                    if info.container.is_definitive() {
+                        return Ok(info);
+                    }
+                }
+            }
+        }
+
+        // A Content-Disposition filename is the origin naming its own file, so
+        // it is evidence rather than a guess.
+        if filename.is_some() {
+            let info = media::identify(resp.content_type(), served_path, None, filename);
+            if info.container.is_definitive() {
+                return Ok(info);
+            }
+        }
+
+        // Last resort: the URL. Only reached when nothing else spoke.
+        let from_path = media::identify(None, served_path, None, None);
+        if from_path.container != Container::Unknown {
+            return Ok(from_path);
+        }
+
+        let declared = resp.content_type().unwrap_or("nothing");
         Err(PlayerError::new(ErrorCode::InvalidContentType)
-            .with_reason("no usable content type and no media extension in the path")
+            .with_reason(format!(
+                "the origin declared {declared} and its path carried no media extension, \
+                 and no body was available to identify it by"
+            ))
             .with_user_action("Verify the link points to a media file."))
     }
 
@@ -978,21 +1145,41 @@ pub(crate) fn header_value_opt(v: &str) -> Option<HeaderValue> {
 }
 
 /// Read at most `cap` bytes of the body, then abandon the response.
-async fn read_head(body: Option<reqwest::Response>, cap: usize) -> Vec<u8> {
-    let mut out = Vec::with_capacity(cap.min(4096));
+async fn read_head(
+    body: Option<reqwest::Response>,
+    cap: usize,
+    budget: Duration,
+) -> Vec<u8> {
+    // A probe reads a prefix to identify the container, and must never
+    // transfer more than that. Cap on the prefix we actually need rather than
+    // on the stream buffer size, or an origin that ignores Range makes a
+    // 1 KiB probe read 64 KiB.
+    let cap = cap.min(PROBE_HEAD_BYTES as usize);
+    let mut out = Vec::with_capacity(cap);
     let Some(resp) = body else { return out };
     // `bytes_stream` consumes the response, which closes the connection as soon
     // as the stream is dropped: we refuse to download a body we will not use.
     let mut stream = resp.bytes_stream();
-    while let Ok(Some(Ok(chunk))) =
-        tokio::time::timeout(Duration::from_millis(1500), stream.next()).await
-    {
+    // The budget is the configured response timeout, not a literal. A hard-coded
+    // 1.5 s meant that raising the timeouts for a slow CDN still produced an
+    // empty head and an "unsupported container" verdict — a timeout reported as
+    // a format problem, which sends the viewer off to convert a fine file.
+    while let Ok(Some(Ok(chunk))) = tokio::time::timeout(budget, stream.next()).await {
         out.extend_from_slice(&chunk);
         if out.len() >= cap {
             break;
         }
     }
     out
+}
+
+/// True for a `Content-Range: bytes */0`, i.e. the origin telling us the
+/// resource has no bytes at all.
+fn is_zero_length(content_range: &str) -> bool {
+    content_range
+        .trim()
+        .strip_prefix("bytes */")
+        .is_some_and(|total| total == "0")
 }
 
 fn scrub_reqwest(err: &reqwest::Error) -> String {

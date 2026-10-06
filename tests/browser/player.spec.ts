@@ -319,7 +319,12 @@ test.describe("failures are legible", () => {
     await open(page, `${ORIGIN}/media/360p.mp4?fault=html`);
     await expect(page.locator("#note")).toBeVisible({ timeout: 20_000 });
     const text = (await page.locator("#note").innerText()).toLowerCase();
-    expect(text).toMatch(/mp4|webm|convert|format|play/i);
+    // The refusal has to name something a person can act on. It used to be
+    // "convert it to MP4", which is actively wrong for a link that has expired
+    // — so the wording now names what the origin actually returned.
+    expect(text).toMatch(
+      /mp4|webm|convert|format|play|video|web page|expired|sign|log ?in/i,
+    );
   });
 
   test("a persistent 5xx reports an upstream failure", async ({ page }) => {

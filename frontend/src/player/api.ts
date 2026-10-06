@@ -19,6 +19,7 @@ const ENDPOINT = {
 interface ProbeWire {
   streamable: boolean;
   content_type: string | null;
+  origin_content_type?: string | null;
   content_length: number | null;
   range_supported: boolean;
   container: string;
@@ -58,7 +59,9 @@ async function toFailure(res: Response): Promise<RequestFailure> {
     message: wire.message ?? "The source could not be reached.",
     ...(wire.reason ? { reason: wire.reason } : {}),
     retryable: wire.retryable === true,
-    user_action: wire.user_action ?? "Try again.",
+    // The server knows why this particular failure happened; keep its wording
+    // unless it sent none.
+    user_action: wire.user_action ?? "",
     status: wire.status ?? res.status,
   });
 }
@@ -80,6 +83,7 @@ export async function probe(url: string, signal: AbortSignal): Promise<ProbeView
   return {
     streamable: w.streamable,
     contentType: w.content_type,
+    originContentType: w.origin_content_type ?? w.content_type,
     contentLength: w.content_length,
     rangeSupported: w.range_supported,
     container: w.container,
