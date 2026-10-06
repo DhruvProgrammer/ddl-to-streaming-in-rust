@@ -1,34 +1,133 @@
-# DDL Player
+# DDL Player — Rust Video Streaming Proxy for Direct Download Links
 
-**Paste a direct download link. It plays in your browser.**
+[![Rust](https://img.shields.io/badge/rust-1.82%2B-000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![TypeScript](https://img.shields.io/badge/typescript-5.6-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Tokio](https://img.shields.io/badge/async-tokio-2E2E2E?logo=rust&logoColor=white)](https://tokio.rs/)
+[![Axum](https://img.shields.io/badge/web-axum-DD4444)](https://github.com/tokio-rs/axum)
 
-A website, not an application: one page, one native `<video>` element, and a
-Rust proxy in front of the origin that does byte ranges, seeking, cancellation
-and failure handling properly. Nothing is written to disk.
+**Paste a direct download link (DDL). It plays in your browser — with real byte-range seeking, no transcoding, and nothing written to disk.**
+
+DDL Player is a self-hosted **video streaming proxy written in Rust** with a
+zero-dependency **TypeScript front end**. It solves the problem every `<video>`
+element runs into: browsers refuse to seek media they did not fetch
+themselves, and a cross-origin file server usually will not hand one over.
+
+Point it at a link like `https://example.com/download/37334` — no extension, an
+opaque ID, a signed query string, a Cloudflare Tunnel host — and it streams.
 
 ```
 frontend/   Vite + TypeScript, no framework, no runtime dependencies
 backend/    Rust + Tokio + Axum + Reqwest
-tests/      integration, chaos, leak, browser (Playwright), load (k6 + harness)
+tests/      integration, chaos, leak, browser (Playwright), load (k6)
 docs/       measured performance report
 ```
 
 ---
 
-## Run it
+## Table of contents
+
+- [Why this exists](#why-this-exists)
+- [Features](#features)
+- [Quick start](#quick-start)
+- [Use cases](#use-cases)
+- [How it works](#how-it-works)
+- [Direct download links without file extensions](#direct-download-links-without-file-extensions)
+- [API reference](#api-reference)
+- [Configuration](#configuration)
+- [Security](#security)
+- [Performance](#performance)
+- [Testing](#testing)
+- [How this compares](#how-this-compares)
+- [FAQ](#faq)
+- [Contributing](#contributing)
+- [License](#license)
+
+---
+
+## Why this exists
+
+Serving video from a download host fails in four predictable ways:
+
+1. **No seeking.** `<video>` can only seek media it fetched itself, and a cross-origin
+   server that does not expose `Content-Range` gives you a file you can watch but
+   cannot scrub.
+2. **CORS.** The origin usually sends no `Access-Control-Allow-Origin`, so the browser
+   blocks the response before a byte is decoded.
+3. **Signed and temporary links.** Query-string tokens, expiring URLs and `/download/<id>`
+   paths have no file extension, so anything that guesses by extension refuses them.
+4. **Ambiguous failures.** A dead link returns an HTML page behind a `200`, and a player
+   that trusts the path reports "unsupported format" — sending you to convert a file that
+   was never broken.
+
+DDL Player is the proxy in front. It makes the bytes look like they came from
+your own origin, and it decides what a link actually is by looking at the
+response rather than at the URL.
+
+## Features
+
+**Streaming**
+
+- True **HTTP byte-range seeking** (`206 Partial Content`), not a restart
+- Native `<video>` playback — no MediaSource, no MSE, no service worker
+- **Progressive streaming**: playback starts on the first frame, not after the
+  whole file downloads
+- Per-session cancellation, so a seek aborts the old upstream request instead
+  of discarding it afterwards
+- Bounded memory: a 20 GB file costs the same as a 20 MB one
+- Connection pooling with windowed origin reads (4 MiB default)
+
+**Link handling**
+
+- Works with **extensionless DDL links** — `/download/37334`, `/get?id=12345`,
+  `/file?token=…`, signed URLs, temporary hosts
+- Container detection from **magic bytes**, `Content-Type` and
+  `Content-Disposition`; the URL extension is the weakest signal and the last one
+- Follows redirects, revalidating **every hop**
+- Honours `Content-Length`, `Content-Range`, `Accept-Ranges`, `ETag` and
+  `Last-Modified`
+- Failures name the real cause: expired link, empty body, JSON error envelope,
+  compressed body — not "unsupported format"
+
+**Security**
+
+- Full **SSRF protection**: scheme allowlist, DNS resolution and pinning (no
+  rebinding window), private/loopback/link-local/CGNAT refusal in IPv4 and IPv6,
+  every redirect hop revalidated
+- Hostname denylist for internal-only names, trailing-dot normalisation
+- Credentials stripped from every log line and error body
+- 256 concurrent streams maximum, enforced with `429` rather than an
+  unbounded queue
+
+**Operations**
+
+- Prometheus `/metrics` and a JSON `/api/stats` endpoint
+- Structured logs, health check, client-event telemetry
+- Single static binary, no runtime dependencies, Docker image included
+
+## Quick start
+
+Requires Rust 1.82+ (the crate's `rust-version`) and Node 20+.
 
 ```bash
-npm run install:all     # installs the two frontend devDependencies
+git clone https://github.com/DhruvProgrammer/ddl-to-streaming-in-rust.git
+cd ddl-to-streaming-in-rust
+
+npm run install:all     # frontend dev dependencies
 npm run build           # builds the site and the release binary
 npm start               # http://127.0.0.1:8787
 ```
 
-Or with Docker:
+With Docker:
 
 ```bash
-docker compose up --build              # the website on :8787
+docker compose up --build              # the player on :8787
 docker compose --profile demo up       # plus a local media origin to try
 ```
+
+To have something to play without hunting for a link, run the bundled fixture
+origin and open `http://127.0.0.1:9000/media/720p.mp4`. It needs
+`DDL_ALLOW_PRIVATE_HOSTS=1`, because the SSRF guard refuses loopback by design.
 
 Development, with hot reload on the page and the proxy on 8787:
 
@@ -37,103 +136,137 @@ npm run dev:server      # cargo run
 npm run dev:web         # vite, proxies /api to 8787
 ```
 
-To try it without hunting for a link, run the fixture origin and use
-`http://127.0.0.1:9000/media/720p.mp4`. That needs
-`DDL_ALLOW_PRIVATE_HOSTS=1`, because the whole point of the SSRF guard is that
-it refuses loopback by default.
+## Use cases
 
----
+- **Self-hosted media player** — serve files from any host, including ones that
+  are not yours and send no CORS headers
+- **Watch a direct download in the browser** — no VLC, no download folder
+- **Scrub long files instantly** — range requests instead of re-downloading
+- **Private or signed links** — tokens stay in the URL, never in the page
+- **Internal tooling** — a video preview for an object store, a backup bucket or
+  a NAS, without opening those services to the internet
+- **Learning reference** — a production-shaped Rust streaming server: bounded
+  concurrency, cancellation, SSRF defence, Prometheus metrics
 
-## What it does
+## How it works
 
 1. You paste a link.
-2. The browser opens `GET /api/stream?url=…` on a native `<video>` element.
-3. The proxy validates the URL, resolves and pins its DNS, validates every
+2. The browser points a native `<video>` element at
+   `GET /api/stream?url=…`.
+3. The proxy validates the URL, resolves and **pins** its DNS, validates every
    redirect hop against the same policy, and streams the body through a bounded
    channel.
-4. A probe runs **in parallel** with the media request, so nothing is delayed
-   waiting to find out whether the file is playable — but you still learn the
-   length, the container, whether seeking works, and why not if something is
-   wrong.
-5. Seeking is a new byte-range request. The previous request's origin work is
-   cancelled, not left to finish and be thrown away.
+4. A 1 KiB **probe** runs *in parallel* with the media request — nothing waits
+   on it — and reports the length, the container, whether seeking will work, and
+   why not if something is wrong.
+5. Seeking issues a new byte-range request. The previous upstream request is
+   cancelled rather than left to finish and be thrown away.
 
-No FFmpeg, no transcoding, no container sniffing on the request path, no
-MediaSource. If a browser can play the file, it plays it directly.
+No FFmpeg, no transcoding, no remuxing on the request path. If a browser can
+play the file, it plays directly.
 
----
+## Direct download links without file extensions
 
-## The parts that matter
+This is the part most proxies get wrong, so it is worth being explicit.
 
-### Byte ranges
+A valid DDL link frequently has **no file extension at all**:
 
-`backend/src/range/` parses inbound `Range` and `Content-Range` and outbound
-`Range`, rejects hostile values, and refuses to guess a length. Every length
-the proxy advertises downstream comes from the live origin response — never
-from the cache — so a stale entry cannot corrupt a seek.
+```
+https://example.com/video.mp4                       ← has an extension
+https://example.com/download/37334                  ← does not
+https://example.com/download/A_SLu4ViVaRA1e51eV8yNiRGIQpB4_D25-okgLU5OxlphDIfGg
+https://example.com/get?id=12345                    ← id in the query
+https://example.com/file?token=abcdef               ← signed / temporary
+```
 
-The transfer status we return depends on what **the client** asked for, not on
-how we happened to window the origin transfer.
+So DDL Player ranks its evidence, strongest first:
 
-### Windowed origin reads
-
-Every origin request is capped at `prefetch_window_bytes` (4 MiB by default)
-and fully consumed, so its connection returns to the pool and is reused across
-seeks. There is **no speculative over-fetch**: we only continue a window when
-the client still wants more. Measured over-fetch under a read-then-abandon
-workload was 7–16 %, which is exactly the partial final window.
-
-### Seeking and cancellation
-
-`backend/src/streaming/registry.rs` gives each playback session a monotonically
-increasing generation. A newer generation cancels the previous one's upstream
-work immediately; an older one delivered late is refused with `409`, so it can
-never overwrite the live stream. Equal generations are allowed, because a
-browser may legitimately have two ranges open at once.
-
-Everything has an owner. The concurrency permit, the cancellation token, the
-origin response and the client channel are all held by one task, and the
-live-stream gauge is decremented by an RAII guard — including on the one path
-nobody writes down, where the client disappears while we are still planning.
-That path was a real leak, found by k6, and is now covered by a regression
-test.
-
-### Bounded everything
-
-| Bound | Default | Where |
+| Rank | Evidence | Notes |
 |---|---|---|
-| Concurrent streams | 256 | `DDL_MAX_CONCURRENT_STREAMS` |
-| Memory per stream | 512 KiB | `DDL_STREAM_BUFFER_BYTES` |
-| Origin read window | 4 MiB | `DDL_PREFETCH_WINDOW_BYTES` |
-| Redirects | 5 | `DDL_MAX_REDIRECTS` |
-| Retry attempts / budget | 4 / 5 s | `DDL_MAX_RETRIES` |
-| Metadata cache | 4096 entries / 1 MiB | `DDL_CACHE_CAPACITY` |
+| 1 | **Response bytes** | Container magic, read from a 1 KiB prefix |
+| 2 | **`Content-Type`** | Parsed, parameters and case handled |
+| 3 | **`Content-Disposition` filename** | The origin naming its own file |
+| 4 | **URL extension** | Last resort only |
 
-Media bytes are never accumulated anywhere. A 20 GB file costs the same
-memory as a 20 MB one, and that is tested rather than asserted.
+The rule that matters: **once a body has been read, the URL extension can no
+longer rescue it.** An HTML error page behind a `.mp4` path is an error page.
+Believing the extension is how an expired link gets reported as "convert your
+file to MP4".
 
-### Security
+The same ranking applies on the streaming path. When the headers and the
+extension are both inconclusive, the stream endpoint fetches a short prefix and
+identifies from the bytes — which is what makes a cold, un-probed,
+extensionless link play instead of returning `415`.
 
-Every DDL is hostile input.
+## API reference
 
-- Scheme, credentials, length and control characters are checked before DNS.
-- Names that can only mean "inside the network" (`localhost`, `*.internal`,
-  `metadata.google.internal`, …) are refused under **every** policy.
-- The host is resolved by us, every answer is checked, and the resolved
-  address is pinned into the connection — so the DNS-rebinding window does not
-  exist.
-- Loopback, RFC1918, CGNAT, link-local, documentation, benchmarking, multicast
-  and reserved space are refused, in IPv4 and IPv6, including `::ffff:` and
-  NAT64 embeddings.
-- Every redirect hop is revalidated from scratch.
+### `POST /api/probe`
 
-`DDL_ALLOW_PRIVATE_HOSTS=1` relaxes *address classes* for self-hosting and for
-the test suites. It never relaxes the name rules, and it logs a warning at
-startup.
+Identifies a source without transferring it. Safe to call on any URL.
+
+```http
+POST /api/probe
+{ "url": "https://example.com/download/37334", "refresh": false }
+```
+
+```json
+{
+  "streamable": true,
+  "content_type": "video/mp4",
+  "origin_content_type": "application/octet-stream",
+  "content_length": 4999379,
+  "range_supported": true,
+  "accept_ranges": "bytes",
+  "container": "mp4",
+  "evidence": "magic-bytes",
+  "needs_remux": false,
+  "etag": "\"4c48d3\"",
+  "last_modified": "Thu, 01 Jan 2026 00:00:00 GMT",
+  "redirects": 0,
+  "ttfb_ms": 1.5,
+  "probe_ms": 1.6,
+  "cached": false,
+  "reason": null,
+  "warning": null
+}
+```
+
+`evidence` names what decided the verdict — `magic-bytes`, `content-type`,
+`content-disposition` or `extension` — so a surprising result is explainable.
+
+### `GET /api/stream?url=<encoded>[&s=<session>&g=<generation>]`
+
+```http
+GET /api/stream?url=https%3A%2F%2Fexample.com%2Fdownload%2F37334
+Range: bytes=1048576-
+->
+206 Partial Content
+Content-Range: bytes 1048576-4999378/4999379
+Content-Length: 3950803
+Content-Type: video/mp4
+Accept-Ranges: bytes
+X-DDL-Request-Id: 3f2a…
+X-DDL-Generation: 4
+X-DDL-Range-Support: bytes
+```
+
+Session and generation travel as query parameters because a native
+`<video src>` cannot carry custom headers. Header equivalents
+(`x-ddl-session`, `x-ddl-generation`) are accepted for API clients and win when
+present.
+
+### Everything else
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/health` | Liveness |
+| `GET /api/stats` | JSON metrics, percentiles and limits |
+| `GET /metrics` | Prometheus text exposition |
+| `POST /api/client-events` | Client telemetry: play / seek / stall timings |
 
 ### Errors
 
-Every failure has a code, a sentence, a reason, a retry verdict and a next
+Every failure carries a code, a sentence, a reason, a retry verdict and a next
 action. There is no "something went wrong".
 
 ```json
@@ -146,147 +279,181 @@ action. There is no "something went wrong".
 }
 ```
 
-### Observability
-
-`/metrics` (Prometheus text) and `/api/stats` (JSON with percentiles and limits).
-Counters, gauges and 4-buckets-per-octave histograms. Query strings and
-credentials are stripped from every log line and every error body.
-
----
-
-## API
-
-```http
-POST /api/probe
-{ "url": "https://example.com/video.mp4", "refresh": false }
-->
-{ "streamable": true, "content_type": "video/mp4",
-  "content_length": 4999379, "range_supported": true,
-  "container": "mp4", "evidence": "content-type",
-  "ttfb_ms": 3.1, "probe_ms": 3.4, "cached": false, "warning": null }
-```
-
-```http
-GET /api/stream?url=<encoded>[&s=<session>&g=<generation>]
-Range: bytes=1048576-
-->
-206 Partial Content
-Content-Range: bytes 1048576-4999378/4999379
-Content-Length: 3950803
-Content-Type: video/mp4
-Accept-Ranges: bytes
-X-DDL-Request-Id: 3f2a…
-X-DDL-Range-Support: bytes | none
-```
-
-Session and generation travel as query parameters because a native
-`<video src>` cannot carry custom headers. Header equivalents
-(`x-ddl-session`, `x-ddl-generation`) are accepted for API clients and win if
-present.
-
-Also: `GET /api/health`, `GET /api/stats`, `GET /metrics`,
-`POST /api/client-events` (counting only: play / seek / stall timings).
-
----
-
 ## Configuration
 
-Everything is an environment variable; the defaults are the ones in
+Everything is an environment variable; the defaults live in
 `backend/src/config.rs`.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `DDL_BIND` | `0.0.0.0:8787` | listen address |
-| `DDL_STATIC_DIR` | `frontend/dist` | built site to serve |
-| `DDL_MAX_CONCURRENT_STREAMS` | `256` | hard ceiling; excess gets `429`, never a queue |
-| `DDL_STREAM_BUFFER_BYTES` | `524288` | per-stream memory bound |
-| `DDL_PREFETCH_WINDOW_BYTES` | `4194304` | max bytes per origin request |
+| `DDL_BIND` | `0.0.0.0:8787` | Listen address |
+| `DDL_STATIC_DIR` | `frontend/dist` | Built site to serve |
+| `DDL_MAX_CONCURRENT_STREAMS` | `256` | Hard ceiling; excess gets `429`, never a queue |
+| `DDL_STREAM_BUFFER_BYTES` | `524288` | Per-stream memory bound |
+| `DDL_PREFETCH_WINDOW_BYTES` | `4194304` | Max bytes per origin request |
 | `DDL_CONNECT_TIMEOUT_MS` | `5000` | TCP connect |
 | `DDL_RESPONSE_TIMEOUT_MS` | `15000` | TTFB deadline |
-| `DDL_IDLE_TIMEOUT_MS` | `20000` | max gap between origin chunks |
-| `DDL_DNS_TIMEOUT_MS` | `5000` | name resolution |
-| `DDL_MAX_REDIRECTS` | `5` | redirect chain length |
-| `DDL_MAX_RETRIES` | `4` | attempts per request |
-| `DDL_RETRY_BASE_MS` / `DDL_RETRY_MAX_MS` | `100` / `2000` | backoff |
-| `DDL_CACHE_CAPACITY` | `4096` | metadata entries |
-| `DDL_CACHE_TTL_MS` | `300000` | metadata lifetime |
-| `DDL_ALLOWED_MEDIA_TYPES` | see config | comma-separated override |
-| `DDL_ALLOW_PRIVATE_HOSTS` | `0` | **re-opens SSRF**; tests and self-hosting only |
-| `DDL_LOG_JSON` | `0` | structured logs |
+| `DDL_IDLE_TIMEOUT_MS` | `20000` | Max gap between origin chunks |
+| `DDL_DNS_TIMEOUT_MS` | `5000` | Name resolution |
+| `DDL_MAX_REDIRECTS` | `5` | Redirect chain length |
+| `DDL_MAX_RETRIES` | `4` | Attempts per request |
+| `DDL_RETRY_BASE_MS` / `DDL_RETRY_MAX_MS` | `100` / `2000` | Backoff |
+| `DDL_CACHE_CAPACITY` | `4096` | Metadata entries |
+| `DDL_CACHE_TTL_MS` | `300000` | Metadata lifetime |
+| `DDL_ALLOWED_MEDIA_TYPES` | MP4, WebM, Ogg, MOV, MP3, WAV | Comma-separated override |
+| `DDL_ALLOW_PRIVATE_HOSTS` | `0` | **Re-opens SSRF.** Self-hosting and tests only |
+| `DDL_LOG_JSON` | `0` | Structured logs |
 
----
+## Security
 
-## Tests
+Every DDL is hostile input.
+
+- Scheme, credentials, length and control characters are checked before DNS.
+- Names that can only mean "inside the network" (`localhost`, `*.internal`,
+  `*.local`, `metadata.google.internal`, …) are refused under **every** policy,
+  including after trailing-dot normalisation.
+- The host is resolved by us, every answer is checked, and the resolved address
+  is **pinned** into the connection — so the DNS-rebinding window does not exist.
+- Loopback, RFC1918, CGNAT, link-local, documentation, benchmarking, multicast
+  and reserved space are refused, in IPv4 and IPv6, including `::ffff:` and
+  NAT64 embeddings.
+- Every redirect hop is revalidated from scratch.
+- Query strings and credentials are stripped from every log line and error body.
+
+`DDL_ALLOW_PRIVATE_HOSTS=1` relaxes *address classes* for self-hosting and for
+the test suites. It never relaxes the name rules, and it logs a warning at
+startup.
+
+## Performance
+
+Real numbers from the development machine, with the commands that produce them,
+are in [docs/PERFORMANCE.md](docs/PERFORMANCE.md). Everything there is labelled
+MEASURED or EXPECTED, and nothing is extrapolated past what was run.
+
+Design choices that keep it fast:
+
+- **Native playback.** No MediaSource, no `fetch`, no service worker — playback
+  starts sooner and uses less CPU and memory. Custom headers would have forced
+  one of them; query parameters cost nothing.
+- **The probe is 1 KiB, not 1 byte.** `bytes=0-0` is cheaper but carries no
+  container signature, so "is this actually MP4?" would be a guess.
+- **No speculative over-fetch.** A window continues only while the client still
+  wants more. Measured over-fetch under a read-then-abandon workload was
+  7–16 %, which is exactly the partial final window.
+- **The cache never makes a byte range.** Caching a length and trusting it later
+  is how a proxy serves a corrupt seek.
+
+## Testing
+
+263 Rust tests and 126 browser tests.
 
 ```bash
-npm run test:rust        # 125 unit tests
-cargo test --manifest-path backend/Cargo.toml --test integration   # 37 end-to-end
-npm run test:chaos       # 17 fault-injection scenarios
-npm run test:leaks       # 8 resource-leak and long-run scenarios
-npm run bench            # criterion micro-benchmarks
+npm run test:rust          # 139 unit
+npm run test:integration   # 37 end-to-end
+npm run test:chaos         # 17 fault-injection scenarios
+npm run test:leaks         # 8 resource-leak and long-run scenarios
+npm run bench              # criterion micro-benchmarks
 
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\with-browser.ps1 -Project chromium
+cargo test --manifest-path backend/Cargo.toml --test extensionless   # 49 DDL identification
+cargo test --manifest-path backend/Cargo.toml --test ddl_live        # 13 live-server DDL flows
+
+npm run test:browser                                     # Playwright, Chromium
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\with-browser.ps1 -Project firefox
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\with-load.ps1 -Levels 1,10,50,100,200,256
-k6 run tests/load/k6.js
 ```
 
 The browser tests drive the real built page against a real origin and assert
 that playback actually starts, that `currentTime` advances, that a seek lands
-where it was asked to, and that failures produce sentences.
+where it was asked to, and that failures produce sentences rather than a black
+rectangle.
 
 `tests/support/fixture-origin.mjs` is a dependency-free HTTP origin that serves
-the fixtures and can be told to misbehave: `slow`, `flaky`, `truncate`,
-`range-less`, `no-length`, `disconnect`, `redirect-loop`, `ssrf-redirect`,
-`html`, `500`/`502`/`503`/`504`/`429`.
+the fixtures and can be told to misbehave:
 
----
+| Group | Faults |
+|---|---|
+| Transport | `slow-flaky` `truncate` `range-less` `html` `no-length` `rate-limit` `500` `502` `503` `504` `429` `disconnect` `redirect-loop` `ssrf-redirect` |
+| Extensionless DDL | `octet` `no-ct` `leading-free` `attachment` `truncated-head` `slow-body` |
+| Redirects | `cdnr` `ext-in-redirect` |
+| Not media | `html-as-binary` `expired-200` `json-error` `lies-mp4` `empty` `gzip` `hls` |
 
-## Measured
+The DDL modes also accept `&head=full\|free\|truncated` and `&name=…` to choose
+the body shape and the `Content-Disposition` filename.
 
-Real numbers from this machine, with the commands that produce them, are in
-[docs/PERFORMANCE.md](docs/PERFORMANCE.md). Everything there is labelled
-MEASURED or EXPECTED, and nothing is extrapolated past what was run.
+## How this compares
 
-## Decisions worth knowing about
+| | Browser `<video src>` | nginx `proxy_pass` | MediaSource in JS | **DDL Player** |
+|---|---|---|---|---|
+| Seeking without CORS | ✗ | ✓ | ✓ | ✓ |
+| Extensionless DDL links | ✗ | ✓ | depends | ✓ |
+| SSRF protection | n/a | ✗ | ✗ | ✓ |
+| DNS rebinding defence | n/a | ✗ | ✗ | ✓ |
+| Names the real failure cause | ✗ | ✗ | ✗ | ✓ |
+| Transcoding / remuxing | ✗ | ✗ | ✗ | ✗ (by design) |
+| Runtime memory for a 20 GB file | n/a | n/a | grows with buffer | flat |
+| Extra infrastructure | none | nginx | none | one binary |
 
-- **No MediaSource, no fetch, no service worker.** Native playback starts
-  faster, uses less CPU and holds less memory. Custom headers would have forced
-  one of them; query parameters cost nothing.
-- **The probe is 1 KiB, not 1 byte.** `bytes=0-0` is cheaper but gives no
-  container signature, so "is this actually MP4?" would be a guess. 1 KiB is
-  the smallest request that lets us sniff the container.
-- **The URL extension is the weakest evidence there is, and the last used.** A
-  real direct-download link is routinely `/download/37334`, `/get?id=12345` or
-  `/file?token=…` — no extension, an opaque id, a signature in the query. So
-  container identification is ranked: response bytes, then `Content-Type`, then
-  a `Content-Disposition` filename (the origin describing its own file), and
-  only then the URL. Critically, once a body has been read, the extension can
-  no longer rescue it: an HTML error page behind a `.mp4` path is an error page,
-  and believing the URL is how an expired link gets reported as "convert your
-  file to MP4".
-- **The streaming path reads the body too, when it has to.** The probe is not in
-  the critical path, so it was once allowed to trust `Content-Type` while the
-  stream endpoint did not. That made the two disagree: the probe would say
-  playable and the stream endpoint would answer 415 for the same URL, so nothing
-  ever played. When the headers and the extension are both inconclusive, the
-  stream path now fetches a 1 KiB prefix and identifies from the bytes — one
-  small request on the cold-cache path only.
-- **A refused source says what actually came back.** `text/html`, an empty body,
-  a JSON error envelope and a content-encoded body are four different problems
-  with four different fixes, and all four used to be reported as "unsupported
-  container". Now they are named, because the viewer's file is usually fine and
-  their link is what expired.
-- **MPEG-TS, FLV, AVI and Matroska are refused with a reason.** They are valid
-  video and no browser will play them from a bare `<video src>`; WebM is a
-  constrained subset of Matroska, not the same thing, and reporting a `.mkv` as
-  `video/webm` just moves the failure to the browser. Remuxing would mean FFmpeg
-  in the request path. The seam for it is one function in the engine; today it
-  reports why it will not, instead of half-playing the file.
-- **HLS manifests are refused, deliberately.** Serving the manifest is easy,
-  but the segment requests that follow would go straight to the origin, outside
-  the proxy — which breaks signed and temporary links outright. Reporting it as
-  playable and then failing is worse than saying so up front.
-- **The metadata cache is not used to decide lengths.** Caching a length and
-  trusting it later is how a proxy serves a corrupt seek. The cache makes
-  probes fast; it never makes a byte range.
+DDL Player does not transcode. MPEG-TS, FLV, AVI and Matroska are valid video
+that no browser will play from a bare `<video src>`, so they are **refused with
+a reason** rather than half-played; the seam for a remux is one function in the
+engine.
+
+HLS manifests are refused too, deliberately: the segment requests that follow
+would go straight to the origin, outside the proxy, which breaks signed and
+temporary links outright.
+
+## FAQ
+
+**Does it work with links that have no file extension?**
+Yes. That is the primary design goal. `/download/37334`, `/get?id=12345` and
+`/file?token=…` are identified from response bytes and headers, never from the
+URL. See [Direct download links without file extensions](#direct-download-links-without-file-extensions).
+
+**Does it transcode or remux?**
+No. FFmpeg in the request path would mean CPU cost and latency on every
+request. If a browser can play the file directly, it does. Non-playable
+containers are refused with a reason that says what to do.
+
+**Does it download the whole file first?**
+No. Playback starts on the first frame. Origin reads are windowed (4 MiB) and
+continued only while the client is still watching.
+
+**Can I use it with a private or signed URL?**
+Yes. Tokens stay in the URL and are never written to disk or echoed into the
+page. The interface keeps the origin's query string out of anything the browser
+can read.
+
+**Is it safe to expose to the internet?**
+It is built as hostile input, with SSRF defence, a 256-stream ceiling and full
+redirect revalidation. It has **not** been through an external security audit,
+so treat it accordingly.
+
+**Can it play HLS (`.m3u8`) streams?**
+Not yet — a manifest is refused with an explanation, because its segments would
+be fetched from the origin directly, outside the proxy. This is a deliberate
+gap rather than a silent failure.
+
+**Why does it refuse loopback by default?**
+Because the SSRF guard is the point: without it, the proxy would fetch
+`http://169.254.169.254/` for anyone who asked. Set `DDL_ALLOW_PRIVATE_HOSTS=1`
+for self-hosting and local testing.
+
+**Do I need Node at runtime?**
+No. `npm run build` produces a static site; the release binary serves it. Node
+is only needed to build the front end.
+
+## Contributing
+
+Issues and pull requests are welcome. Please run the checks first:
+
+```bash
+npm run check    # typecheck, cargo fmt, clippy -D warnings, full test suite
+```
+
+If you are changing how a source is identified, `tests/integration/extensionless.rs`
+and `tests/integration/ddl_live.rs` are the tests to run — and if you can make
+them fail first, that is the best possible contribution.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
